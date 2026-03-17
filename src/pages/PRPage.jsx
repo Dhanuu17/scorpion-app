@@ -38,7 +38,58 @@ export default function PRPage() {
   const [form, setForm] = useState(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
 
+  // Smart Search States
+  const [searchResults, setSearchResults] = useState([])
+  const [isSearching, setIsSearching] = useState(false)
+
   useEffect(() => { fetchAll() }, [profile])
+
+  // 🎯 SMART SEARCH API LOGIC
+  useEffect(() => {
+    const term = form.ticket_ref || '';
+    if (term.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    const fetchTickets = async () => {
+      setIsSearching(true);
+      const { data, error } = await supabase
+        .from('Cygnux_Master_Ticket')
+        .select('TicketNo, Description')
+        .or(`TicketNo.ilike.%${term}%,Description.ilike.%${term}%`)
+        .limit(10);
+
+      if (!error && data) setSearchResults(data);
+      setIsSearching(false);
+    };
+
+    // 300ms debounce
+    const timeoutId = setTimeout(fetchTickets, 300);
+    return () => clearTimeout(timeoutId);
+  }, [form.ticket_ref]);
+
+  // 🎯 AUTOFILL LOGIC
+  const handleSelectTicket = (ticket) => {
+    let matchedBranchId = form.branch_id;
+    
+    // Slash logic for branch extraction
+    const parts = ticket.TicketNo.split('/');
+    if (parts.length > 1) {
+      const branchCode = parts[1]; // e.g., 'HQTR'
+      // Try to find matching branch in database branches array
+      const matched = branches.find(b => b.branch_code === branchCode || b.branch_name.includes(branchCode));
+      if (matched) matchedBranchId = matched.branch_id;
+    }
+
+    setForm(f => ({
+      ...f,
+      ticket_ref: ticket.TicketNo,
+      justification: ticket.Description,
+      branch_id: matchedBranchId
+    }));
+    setSearchResults([]); // Hide dropdown
+  };
 
   async function fetchAll() {
     setLoading(true)
@@ -97,7 +148,6 @@ export default function PRPage() {
       const { error: lineErr } = await supabase.from('pr_line_items').insert(lineItems)
       if (lineErr) throw lineErr
 
-      // Audit log
       await supabase.from('audit_log').insert({
         entity_type: 'pr', entity_id: pr.pr_id,
         action: isDraft ? 'draft_saved' : 'pr_submitted',
@@ -140,7 +190,6 @@ export default function PRPage() {
       <PageHeader title="Purchase Requisitions" subtitle="Manage all IT procurement requests"
         action={<button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setShowForm(true) }}><Plus size={15} /> New PR</button>} />
 
-      {/* Filters */}
       <div className="flex gap-3 flex-wrap">
         <div className="relative flex-1 min-w-48">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -154,7 +203,6 @@ export default function PRPage() {
         </select>
       </div>
 
-      {/* Table */}
       {loading ? (
         <div className="flex justify-center py-12"><Spinner size={32} /></div>
       ) : filtered.length === 0 ? (
@@ -201,7 +249,7 @@ export default function PRPage() {
         </div>
       )}
 
-      {/* New PR Modal */}
+      {/* NEW PR FORM MODAL */}
       <Modal open={showForm} onClose={() => setShowForm(false)} title="New Purchase Requisition"
         subtitle="Select items from SKU master — no free text allowed" size="xl">
         <div className="space-y-5">
@@ -209,7 +257,7 @@ export default function PRPage() {
             <Field label="Branch" required>
               <select className="form-select" value={form.branch_id} onChange={e => setForm({ ...form, branch_id: e.target.value })}>
                 <option value="">Select branch...</option>
-                {branches.map(b => <option key={b.branch_id} value={b.branch_id}>{b.branch_name}</option>)}
+                {branches.map(b => <option key={b.branch_id} value={b.branch_id}>{b.branch_code} - {b.branch_name}</option>)}
               </select>
             </Field>
             <Field label="PR Type" required>
@@ -227,23 +275,49 @@ export default function PRPage() {
                 <option value="critical">Critical</option>
               </select>
             </Field>
+
+            {/* 🎯 SMART SEARCH FIELD */}
             <Field label="Helpdesk Ticket Ref">
-              <input className="form-input" placeholder="HD-2024-1234" value={form.ticket_ref}
-                onChange={e => setForm({ ...form, ticket_ref: e.target.value })} />
+              <div className="relative">
+                <input 
+                  className="form-input w-full" 
+                  placeholder="Type Ticket No (e.g. HRS/HQTR...)" 
+                  value={form.ticket_ref}
+                  onChange={e => setForm({ ...form, ticket_ref: e.target.value })} 
+                  autoComplete="off" 
+                />
+                {isSearching && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">...</span>}
+                
+                {searchResults.length > 0 && (
+                  <ul className="absolute z-10 w-full bg-white border border-slate-200 mt-1 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                    {searchResults.map((ticket, i) => (
+                      <li 
+                        key={i} 
+                        onClick={() => handleSelectTicket(ticket)} 
+                        className="p-3 hover:bg-slate-50 cursor-pointer border-b border-slate-100 last:border-0 transition-colors text-left"
+                      >
+                        <div className="font-semibold text-blue-600 text-xs">{ticket.TicketNo}</div>
+                        <div className="text-xs text-slate-500 truncate mt-0.5">{ticket.Description}</div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </Field>
+
             <Field label="Required By Date">
-              <input className="form-input" type="date" value={form.required_by_date}
+              <input className="form-input w-full" type="date" value={form.required_by_date}
                 onChange={e => setForm({ ...form, required_by_date: e.target.value })} />
             </Field>
           </div>
 
+          {/* AUTO-FILLED JUSTIFICATION */}
           <Field label="Business Justification" required>
-            <textarea className="form-input" rows={3}
+            <textarea className="form-input w-full" rows={3}
               placeholder="Explain why this procurement is required and business impact if not fulfilled..."
               value={form.justification} onChange={e => setForm({ ...form, justification: e.target.value })} />
           </Field>
 
-          {/* Line Items */}
           <div>
             <div className="section-label">Line Items</div>
             <div className="overflow-x-auto">
@@ -261,22 +335,22 @@ export default function PRPage() {
                   {form.items.map((item, idx) => (
                     <tr key={idx} className="border-t border-slate-100">
                       <td className="px-3 py-2">
-                        <select className="form-select text-xs" value={item.sku_id}
+                        <select className="form-select text-xs w-full" value={item.sku_id}
                           onChange={e => updateItem(idx, 'sku_id', e.target.value)}>
                           <option value="">Select SKU...</option>
                           {skus.map(s => <option key={s.sku_id} value={s.sku_id}>{s.sku_code} · {s.sku_name}</option>)}
                         </select>
                       </td>
                       <td className="px-3 py-2">
-                        <input className="form-input w-16 text-xs" type="number" min="1" value={item.quantity}
+                        <input className="form-input w-full text-xs" type="number" min="1" value={item.quantity}
                           onChange={e => updateItem(idx, 'quantity', e.target.value)} />
                       </td>
                       <td className="px-3 py-2">
-                        <input className="form-input text-xs" type="number" placeholder="0.00" value={item.estimated_cost}
+                        <input className="form-input w-full text-xs" type="number" placeholder="0.00" value={item.estimated_cost}
                           onChange={e => updateItem(idx, 'estimated_cost', e.target.value)} />
                       </td>
                       <td className="px-3 py-2">
-                        <input className="form-input text-xs" placeholder="Notes or asset tag for repair..."
+                        <input className="form-input w-full text-xs" placeholder="Notes or asset tag for repair..."
                           value={item.notes} onChange={e => updateItem(idx, 'notes', e.target.value)} />
                       </td>
                       <td className="px-3 py-2">
